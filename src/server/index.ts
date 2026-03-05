@@ -3,35 +3,36 @@ import { routePartykitRequest, Server } from "partyserver";
 import type { OutgoingMessage, Position } from "../shared";
 import type { Connection, ConnectionContext } from "partyserver";
 
+// ---------- Globe (your existing feature) ----------
+
 // This is the state that we'll store on each connection
-type ConnectionState = {
+type GlobeConnectionState = {
 	position: Position;
 };
 
 export class Globe extends Server {
-	onConnect(conn: Connection<ConnectionState>, ctx: ConnectionContext) {
-		// Whenever a fresh connection is made, we'll
-		// send the entire state to the new connection
-
-		// First, let's extract the position from the Cloudflare headers
+	onConnect(conn: Connection<GlobeConnectionState>, ctx: ConnectionContext) {
+		// Extract position from Cloudflare headers
 		const latitude = ctx.request.cf?.latitude as string | undefined;
 		const longitude = ctx.request.cf?.longitude as string | undefined;
+
 		if (!latitude || !longitude) {
 			console.warn(`Missing position information for connection ${conn.id}`);
 			return;
 		}
-		const position = {
+
+		const position: Position = {
 			lat: parseFloat(latitude),
 			lng: parseFloat(longitude),
 			id: conn.id,
 		};
-		// And save this on the connection's state
-		conn.setState({
-			position,
-		});
 
-		// Now, let's send the entire state to the new connection
-		for (const connection of this.getConnections<ConnectionState>()) {
+		// Save on this connection's state
+		conn.setState({ position });
+
+		// Send all existing markers to the new connection
+		// and send the new marker to everyone else
+		for (const connection of this.getConnections<GlobeConnectionState>()) {
 			try {
 				conn.send(
 					JSON.stringify({
@@ -41,7 +42,6 @@ export class Globe extends Server {
 					} satisfies OutgoingMessage),
 				);
 
-				// And let's send the new connection's position to all other connections
 				if (connection.id !== conn.id) {
 					connection.send(
 						JSON.stringify({
@@ -56,8 +56,7 @@ export class Globe extends Server {
 		}
 	}
 
-	// Whenever a connection closes (or errors), we'll broadcast a message to all
-	// other connections to remove the marker.
+	// Remove marker on disconnect/error
 	onCloseOrError(connection: Connection) {
 		this.broadcast(
 			JSON.stringify({
@@ -76,6 +75,75 @@ export class Globe extends Server {
 		this.onCloseOrError(connection);
 	}
 }
+
+// ---------- Chat (NEW feature) ----------
+
+type ChatState = {
+	name: string;
+	country: string;
+};
+
+export class Chat extends Server {
+	private broadcastCount() {
+		const n = Array.from(this.getConnections<ChatState>()).length;
+		this.broadcast(JSON.stringify({ type: "count", n }));
+	}
+
+	onConnect(conn: Connection<ChatState>, ctx: ConnectionContext) {
+		const country = (ctx.request.cf?.country as string | undefined) ?? "??";
+
+		conn.setState({
+			name: "anon",
+			country,
+		});
+
+		this.broadcastCount();
+	}
+
+	onClose(_connection: Connection) {
+		this.broadcastCount();
+	}
+
+	onError(_connection: Connection) {
+		this.broadcastCount();
+	}
+
+	onMessage(conn: Connection<ChatState>, message: string) {
+		let data: any;
+		try {
+			data = JSON.parse(message);
+		} catch {
+			data = { type: "chat", text: String(message || "") };
+		}
+
+		const state = conn.state ?? { name: "anon", country: "??" };
+
+		// Set username
+		if (data.type === "setName") {
+			const clean = String(data.name || "anon").trim().slice(0, 20);
+			conn.setState({ ...state, name: clean });
+			return;
+		}
+
+		// Send a chat message
+		if (data.type === "chat") {
+			const text = String(data.text || "").trim().slice(0, 300);
+			if (!text) return;
+
+			this.broadcast(
+				JSON.stringify({
+					type: "chat",
+					name: state.name,
+					country: state.country,
+					text,
+					ts: Date.now(),
+				}),
+			);
+		}
+	}
+}
+
+// ---------- Worker fetch ----------
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
