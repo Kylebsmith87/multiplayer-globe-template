@@ -117,3 +117,154 @@ function App() {
 
 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
 createRoot(document.getElementById("root")!).render(<App />);
+// ------------------------------
+// FreezingBalls Chat Overlay (NO React required)
+// Paste this at the VERY BOTTOM of src/client/index.tsx
+// ------------------------------
+(function addChatOverlay() {
+  // Avoid double-inject if hot reload / double execution
+  if (document.getElementById("fb-chat-overlay")) return;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #fb-chat-overlay {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      width: 320px;
+      z-index: 999999;
+      background: rgba(0,0,0,0.72);
+      color: #fff;
+      font-family: Arial, sans-serif;
+      border-radius: 12px;
+      padding: 10px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+      backdrop-filter: blur(6px);
+    }
+    #fb-chat-top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+    #fb-chat-log {
+      height: 160px;
+      overflow: auto;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 10px;
+      padding: 6px;
+      background: rgba(0,0,0,0.25);
+    }
+    #fb-chat-row { display:flex; gap:6px; margin-top:6px; }
+    #fb-chat-input {
+      flex: 1;
+      padding: 8px;
+      border-radius: 10px;
+      border: none;
+      outline: none;
+    }
+    #fb-chat-send, #fb-chat-name {
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+    }
+    #fb-chat-send { font-weight: 700; }
+    #fb-chat-note { opacity:0.75; font-size: 12px; margin-top:6px; }
+  `;
+  document.head.appendChild(style);
+
+  const box = document.createElement("div");
+  box.id = "fb-chat-overlay";
+  box.innerHTML = `
+    <div id="fb-chat-top">
+      <div><b>Chat</b> · <span id="fb-chat-count">0</span> online</div>
+      <button id="fb-chat-name">Set name</button>
+    </div>
+    <div id="fb-chat-log"></div>
+    <div id="fb-chat-row">
+      <input id="fb-chat-input" placeholder="Type a message…" />
+      <button id="fb-chat-send">Send</button>
+    </div>
+    <div id="fb-chat-note">Tip: press Enter to send</div>
+  `;
+  document.body.appendChild(box);
+
+  const log = document.getElementById("fb-chat-log") as HTMLDivElement;
+  const input = document.getElementById("fb-chat-input") as HTMLInputElement;
+  const sendBtn = document.getElementById("fb-chat-send") as HTMLButtonElement;
+  const nameBtn = document.getElementById("fb-chat-name") as HTMLButtonElement;
+  const countSpan = document.getElementById("fb-chat-count") as HTMLSpanElement;
+
+  function flagEmoji(cc: string) {
+    if (!cc || cc.length !== 2) return "🏳️";
+    const A = 0x1f1e6;
+    const up = cc.toUpperCase();
+    const a = up.charCodeAt(0) - 65;
+    const b = up.charCodeAt(1) - 65;
+    if (a < 0 || a > 25 || b < 0 || b > 25) return "🏳️";
+    return String.fromCodePoint(A + a, A + b);
+  }
+
+  function addLine(text: string) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // Username handling
+  let name = localStorage.getItem("fb_name") || "";
+  function updateNameButton() {
+    nameBtn.textContent = name ? name : "Set name";
+  }
+  updateNameButton();
+
+  // Connect websocket
+  const ws = new WebSocket(`wss://${location.host}/parties/chat/global`);
+
+  ws.onopen = () => {
+    addLine("✅ Connected to chat");
+    if (name) {
+      ws.send(JSON.stringify({ type: "setName", name }));
+    }
+  };
+
+  ws.onmessage = (e) => {
+    let m: any;
+    try { m = JSON.parse(e.data); } catch { return; }
+
+    if (m.type === "count") {
+      countSpan.textContent = String(m.n ?? 0);
+      return;
+    }
+
+    if (m.type === "chat") {
+      const f = flagEmoji(String(m.country || ""));
+      const who = String(m.name || "anon");
+      const msg = String(m.text || "");
+      addLine(`${f} ${who}: ${msg}`);
+      return;
+    }
+  };
+
+  ws.onclose = () => addLine("❌ Chat disconnected");
+  ws.onerror = () => addLine("⚠️ Chat error");
+
+  nameBtn.onclick = () => {
+    const picked = prompt("Pick a username (max 20 chars):", name || "anon");
+    if (!picked) return;
+    name = picked.trim().slice(0, 20) || "anon";
+    localStorage.setItem("fb_name", name);
+    updateNameButton();
+    ws.send(JSON.stringify({ type: "setName", name }));
+  };
+
+  function send() {
+    const text = input.value.trim();
+    if (!text) return;
+    ws.send(JSON.stringify({ type: "chat", text }));
+    input.value = "";
+    input.focus();
+  }
+
+  sendBtn.onclick = send;
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") send();
+  });
+})();
