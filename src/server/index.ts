@@ -3,16 +3,14 @@ import { routePartykitRequest, Server } from "partyserver";
 import type { OutgoingMessage, Position } from "../shared";
 import type { Connection, ConnectionContext } from "partyserver";
 
-// ---------- Globe (your existing feature) ----------
+// ---------- Globe (existing feature) ----------
 
-// This is the state that we'll store on each connection
 type GlobeConnectionState = {
 	position: Position;
 };
 
 export class Globe extends Server {
 	onConnect(conn: Connection<GlobeConnectionState>, ctx: ConnectionContext) {
-		// Extract position from Cloudflare headers
 		const latitude = ctx.request.cf?.latitude as string | undefined;
 		const longitude = ctx.request.cf?.longitude as string | undefined;
 
@@ -27,13 +25,11 @@ export class Globe extends Server {
 			id: conn.id,
 		};
 
-		// Save on this connection's state
 		conn.setState({ position });
 
-		// Send all existing markers to the new connection
-		// and send the new marker to everyone else
 		for (const connection of this.getConnections<GlobeConnectionState>()) {
 			try {
+				// Send existing markers to the new connection
 				conn.send(
 					JSON.stringify({
 						type: "add-marker",
@@ -42,6 +38,7 @@ export class Globe extends Server {
 					} satisfies OutgoingMessage),
 				);
 
+				// Send the new marker to everyone else
 				if (connection.id !== conn.id) {
 					connection.send(
 						JSON.stringify({
@@ -56,7 +53,6 @@ export class Globe extends Server {
 		}
 	}
 
-	// Remove marker on disconnect/error
 	onCloseOrError(connection: Connection) {
 		this.broadcast(
 			JSON.stringify({
@@ -84,9 +80,12 @@ type ChatState = {
 };
 
 export class Chat extends Server {
+	private onlineCount() {
+		return Array.from(this.getConnections<ChatState>()).length;
+	}
+
 	private broadcastCount() {
-		const n = Array.from(this.getConnections<ChatState>()).length;
-		this.broadcast(JSON.stringify({ type: "count", n }));
+		this.broadcast(JSON.stringify({ type: "count", n: this.onlineCount() }));
 	}
 
 	onConnect(conn: Connection<ChatState>, ctx: ConnectionContext) {
@@ -97,6 +96,7 @@ export class Chat extends Server {
 			country,
 		});
 
+		// Update online count for everyone
 		this.broadcastCount();
 	}
 
@@ -108,25 +108,33 @@ export class Chat extends Server {
 		this.broadcastCount();
 	}
 
-	onMessage(conn: Connection<ChatState>, message: string) {
+	onMessage(conn: Connection<ChatState>, message: unknown) {
+		// PartyServer may deliver message as string or something else.
+		const raw =
+			typeof message === "string"
+				? message
+				: message instanceof ArrayBuffer
+					? new TextDecoder().decode(message)
+					: "";
+
 		let data: any;
 		try {
-			data = JSON.parse(message);
+			data = JSON.parse(raw);
 		} catch {
-			data = { type: "chat", text: String(message || "") };
+			data = { type: "chat", text: raw };
 		}
 
 		const state = conn.state ?? { name: "anon", country: "??" };
 
 		// Set username
-		if (data.type === "setName") {
-			const clean = String(data.name || "anon").trim().slice(0, 20);
+		if (data?.type === "setName") {
+			const clean = String(data.name || "anon").trim().slice(0, 20) || "anon";
 			conn.setState({ ...state, name: clean });
 			return;
 		}
 
 		// Send a chat message
-		if (data.type === "chat") {
+		if (data?.type === "chat") {
 			const text = String(data.text || "").trim().slice(0, 300);
 			if (!text) return;
 
@@ -147,6 +155,16 @@ export class Chat extends Server {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
+		// If someone opens a party endpoint in a normal browser tab,
+		// return a clear response instead of throwing a Worker exception.
+		const url = new URL(request.url);
+		if (url.pathname.startsWith("/parties/")) {
+			const upgrade = request.headers.get("Upgrade") || "";
+			if (upgrade.toLowerCase() !== "websocket") {
+				return new Response("This endpoint is WebSocket-only.", { status: 426 });
+			}
+		}
+
 		return (
 			(await routePartykitRequest(request, { ...env })) ||
 			new Response("Not Found", { status: 404 })
